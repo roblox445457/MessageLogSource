@@ -18,7 +18,7 @@ from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
 
-from database import Database
+from database import DEFAULT_EVENTS, Database
 
 load_dotenv()
 logging.basicConfig(
@@ -86,6 +86,7 @@ BUTTON_EMOJI = {
     "message": discord.PartialEmoji(name="message", id=1561415443120656504),
 }
 EVENT_LABELS = {
+    "message_create": "New message",
     "message_delete": "Message deleted",
     "message_edit": "Message edited",
     "bulk_delete": "Bulk deletion",
@@ -272,6 +273,7 @@ def config_embed(guild: discord.Guild, config: dict[str, Any]) -> discord.Embed:
     channel = guild.get_channel(config.get("channel_id")) if config.get("channel_id") else None
     channel_text = channel.mention if isinstance(channel, discord.TextChannel) else "Not configured"
     active = [label for key, label in (
+        ("message_create", "New messages"),
         ("message_delete", "Message deletions"),
         ("message_edit", "Message edits"),
         ("bulk_delete", "Bulk deletions"),
@@ -280,8 +282,7 @@ def config_embed(guild: discord.Guild, config: dict[str, Any]) -> discord.Embed:
     ) if config["event_types"].get(key, False)]
     embed = new_embed(f"{EMOJI['config']}  Configuration")
     embed.description = (
-        "Choose whether to log message deletions, verified edits, bulk deletions, "
-        "member joins, and member leaves. Newly sent messages are never logged."
+        "Choose which events to log. New-message logging is optional and starts off."
     )
     embed.add_field(name="Logging channel", value=channel_text, inline=True)
     embed.add_field(
@@ -691,7 +692,8 @@ def help_embed(category: str = "Overview") -> discord.Embed:
             "`/logs enable` — start the selected event logging.\n"
             "`/logs disable` — pause new event logging.\n"
             "`/logs status` — inspect status and tracked events.\n"
-            "`/logs test` — send a test embed to the destination.\n\n"
+            "`/logs test` — send a test embed to the destination.\n"
+            "`/config` — choose events per server; new-message logging starts off.\n\n"
             "**Permission:** Manage Server or Administrator for changes; "
             "Manage Server or log-channel access to view status."
         ),
@@ -718,7 +720,7 @@ def help_embed(category: str = "Overview") -> discord.Embed:
             "`/feedback` — send feedback to the MessageLog team.\n"
             "`/config` — open interactive server settings.\n\n"
             "`/config` requires Manage Server or Administrator. "
-            "Newly sent messages are never logged."
+            "New-message logging can be enabled per server and is off by default."
         ),
     }
     embed = new_embed(f"{EMOJI['info']}  MessageLog command guide")
@@ -894,6 +896,7 @@ class SetChannelModal(discord.ui.Modal, title="Set logging channel"):
 class ConfigEventSelect(discord.ui.Select):
     def __init__(self, event_types: dict[str, bool]):
         labels = [
+            ("message_create", "New messages", "Log new messages; off by default."),
             ("message_delete", "Message deletions", "Log deleted messages when Discord provides them."),
             ("message_edit", "Message edits", "Log only verified text or attachment changes."),
             ("bulk_delete", "Bulk deletions", "Log messages removed in a bulk-delete action."),
@@ -921,7 +924,7 @@ class ConfigEventSelect(discord.ui.Select):
             return
         selected = set(self.values)
         config = await DB.get_config(interaction.guild.id)
-        events = {key: key in selected for key in config["event_types"]}
+        events = {key: key in selected for key in DEFAULT_EVENTS}
         await DB.update_config(interaction.guild.id, event_types=events)
         for option in self.options:
             option.default = option.value in selected
@@ -1476,6 +1479,7 @@ async def message_view(interaction: discord.Interaction, record_id: app_commands
     limit="Maximum number of records (1–25)",
 )
 @app_commands.choices(event_type=[
+    app_commands.Choice(name="New messages", value="message_create"),
     app_commands.Choice(name="Deleted messages", value="message_delete"),
     app_commands.Choice(name="Edited messages", value="message_edit"),
     app_commands.Choice(name="Bulk deletions", value="bulk_delete"),
@@ -1658,6 +1662,38 @@ async def config_command(interaction: discord.Interaction):
         embed=config_embed(interaction.guild, await DB.get_config(interaction.guild.id)),
         view=ConfigView(await DB.get_config(interaction.guild.id)),
         ephemeral=True,
+    )
+
+
+@bot.listen("on_message")
+async def log_new_member_message(message: discord.Message):
+    guild = message.guild
+    if guild is None or message.author.bot or message.webhook_id is not None:
+        return
+    config = await DB.get_config(guild.id)
+    if not config["enabled"] or not config["event_types"].get("message_create", False):
+        return
+
+    channel = message.channel
+    author = message.author
+    attachments = attachments_from_message(message)
+    await persist_and_post(
+        guild,
+        "message_create",
+        message_id=message.id,
+        author_id=author.id,
+        author_name=str(author),
+        channel_id=channel.id,
+        channel_name=getattr(channel, "name", None),
+        content=message.content or None,
+        attachments=attachments,
+        metadata={
+            "note": None if message.content else "No message text was provided by Discord.",
+            "avatar_url": author.display_avatar.url,
+            "jump_url": message.jump_url,
+            "message_created_at": message.created_at.isoformat(),
+        },
+        event_at=message.created_at.isoformat(),
     )
 
 

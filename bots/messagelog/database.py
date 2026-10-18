@@ -9,6 +9,7 @@ import aiosqlite
 
 
 DEFAULT_EVENTS = {
+    "message_create": False,
     "message_delete": True,
     "message_edit": True,
     "bulk_delete": True,
@@ -110,7 +111,10 @@ class Database:
             }
         result = dict(row)
         try:
-            result["event_types"] = json.loads(result["event_types"])
+            stored_events = json.loads(result["event_types"])
+            if not isinstance(stored_events, dict):
+                raise TypeError("Stored event settings must be an object")
+            result["event_types"] = {**DEFAULT_EVENTS, **stored_events}
         except (TypeError, json.JSONDecodeError):
             result["event_types"] = dict(DEFAULT_EVENTS)
         result["enabled"] = bool(result["enabled"])

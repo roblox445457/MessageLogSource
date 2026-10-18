@@ -1,6 +1,6 @@
 # MessageLog
 
-MessageLog is a Discord utility bot that records message deletions, edits, bulk deletions, and optionally member joins and leaves. It stores per-server configuration and event records in SQLite, with interactive configuration and log browsers.
+MessageLog is a Discord utility bot that records message deletions, verified edits, bulk deletions, and optionally new messages and member joins/leaves. New-message logging is configurable per server and off by default. It stores per-server configuration and event records in SQLite, with interactive configuration and log browsers.
 
 ## What it records—and Discord's limits
 
@@ -10,7 +10,7 @@ MessageLog is a Discord utility bot that records message deletions, edits, bulk 
 - Bulk deletion is logged per message when the event is delivered. Cached entries include their known content; uncached entries remain metadata-only.
 - The bot does not claim to retrieve messages or content that Discord did not provide.
 - `/snipe` shows the latest deletion captured for the current channel while the bot is running. It is private to the caller and uses the same Discord cache limits; the in-memory snipe cache clears when the bot restarts.
-- MessageLog never records ordinary newly sent messages. The configuration panel offers only deletions, verified edits, bulk deletions, member joins, and member leaves.
+- Ordinary new messages are recorded only when a server administrator enables **New messages** in `/config`. This setting is off by default, and bot/webhook messages are excluded.
 
 ## Requirements
 
@@ -76,7 +76,7 @@ In this Replit project, add `DISCORD_BOT_TOKEN` through **Secrets** and start th
 ## First-time server setup
 
 1. Run `/create channel` to create a private `#message-logs` channel and enable logging, or use `/set channel` and select an existing text channel.
-2. Open `/config` to see status and select tracked events. Message delete/edit and bulk-delete events start enabled; member join/leave events start disabled.
+2. Open `/config` to see status and select tracked events. Message delete/edit and bulk-delete events start enabled; new-message logging and member join/leave events start disabled.
 3. Use `/logs test` to confirm the bot can send embeds.
 4. Use `/logs status` to review the current settings.
 
@@ -109,13 +109,13 @@ Only a member with **Manage Server** or **Administrator** can change configurati
 | `/feedback` | Open the feedback submission form | Server members |
 | `/config` | Open the interactive settings panel | Manage Server / Administrator |
 
-The configuration panel includes working controls to enable/disable logging, choose tracked event types, set a channel by ID, create a channel, and open the command guide. The event selector describes deletions, verified edits, bulk deletions, joins, and leaves; it does not offer new-message logging. Log cards include buttons for stored details, member details, and help. Search/history browsers include previous/next navigation, details, and close controls. The help and support panels include the **Send Feedback** modal control.
+The configuration panel includes working controls to enable/disable logging, choose tracked event types, set a channel by ID, create a channel, and open the command guide. Its event selector includes new messages (off by default), deletions, verified edits, bulk deletions, joins, and leaves. Log cards include buttons for stored details, member details, and help. Search/history browsers include previous/next navigation, details, and close controls. The help and support panels include the **Send Feedback** modal control.
 
 ## Operational notes
 
 - The database is SQLite and is initialized automatically. Configure an appropriate persistent disk/file path for the deployment.
 - The bot checks permissions again when an administrator invokes a sensitive command or component; command visibility in Discord is not the security boundary.
-- The bot never logs message-create events, only edits/deletions and the selected optional member events.
+- New-message logging is an opt-in per-server event and starts disabled. When enabled, message text and attachment metadata are sent to the configured log channel and stored in SQLite; readers of that channel can see them. Bot and webhook messages are skipped.
 - `/snipe` is channel-specific, ephemeral, and in-memory. It can show that a deletion occurred without content when the message was not cached by Discord; it cannot recover uncached content.
 - Metadata-only Discord message updates do not create edit logs. If the old message was not cached, MessageLog cannot verify a real edit and skips that alert.
 - Feedback cooldown records are durable in SQLite. Feedback queued because its destination is unavailable is retried on a later bot connection.
