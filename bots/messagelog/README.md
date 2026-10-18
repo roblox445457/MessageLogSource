@@ -28,7 +28,7 @@ MessageLog is a Discord utility bot that records message deletions, verified edi
    - Send Messages
    - Embed Links
    - Read Message History
-   - Manage Channels (only needed for `/create channel`; otherwise admins can use `/set channel`)
+   - Manage Channels (needed only when `/create channel` must create a new channel; it reuses an existing MessageLog channel)
 5. Copy the bot token into an environment secret named `DISCORD_BOT_TOKEN`. Do not commit it or paste it into chat.
 
 ## Run locally
@@ -61,7 +61,7 @@ The bot creates `messagelog.sqlite3` automatically and registers its global appl
 | `FEEDBACK_CHANNEL_ID` | No | Feedback destination text channel; defaults to `1561421143636971562` |
 | `FEEDBACK_OWNER_IDS` | No | Comma-separated Discord user IDs allowed to reply; defaults to `1230660770749087796,1354784283796967444` |
 
-In this Replit project, add `DISCORD_BOT_TOKEN` through **Secrets** and start the **MessageLog Bot** workflow. It launches the bot from `bots/messagelog/bot.py`. Keep the SQLite file on persistent storage; an ephemeral deployment filesystem can lose its database on restart/redeploy. For a larger or multi-instance deployment, move persistence to PostgreSQL before scaling out.
+In this Replit project, add `DISCORD_BOT_TOKEN` through **Secrets** and start the **MessageLog Bot** workflow. It launches the bot from `bots/messagelog/bot.py`. Guild configurations, message events, feedback submissions, cooldowns, and owner replies are committed to the same SQLite database (`messagelog.sqlite3` by default, or the path in `DATABASE_PATH`); they survive bot restarts as long as that file remains on persistent storage. An ephemeral deployment filesystem can lose its database on restart/redeploy, so configure a persistent database path and keep backups if deploying that way. For a larger or multi-instance deployment, move persistence to PostgreSQL before scaling out.
 
 ### Feedback setup, privacy, and replies
 
@@ -76,7 +76,7 @@ In this Replit project, add `DISCORD_BOT_TOKEN` through **Secrets** and start th
 ## First-time server setup
 
 1. Run `/create channel` to create a private `#message-logs` channel and enable logging, or use `/set channel` and select an existing text channel.
-2. Open `/config` to see status and select tracked events. Message delete/edit and bulk-delete events start enabled; new-message logging and member join/leave events start disabled.
+2. Open `/config` to see status and select tracked events. Message delete/edit and bulk-delete events start enabled; new-message logging and member join/leave events start disabled. `/create channel` reuses its existing MessageLog channel and will not create another one.
 3. Use `/logs test` to confirm the bot can send embeds.
 4. Use `/logs status` to review the current settings.
 
@@ -87,7 +87,7 @@ Only a member with **Manage Server** or **Administrator** can change configurati
 | Command | What it does | Access |
 |---|---|---|
 | `/set channel channel:#channel` | Set an existing text log destination | Manage Server / Administrator |
-| `/create channel` | Create a private destination and enable logging | Manage Server / Administrator; bot needs Manage Channels |
+| `/create channel` | Create or reuse the one MessageLog destination and enable logging | Manage Server / Administrator; bot needs Manage Channels only when creating |
 | `/remove channel` | Remove destination and disable logging | Manage Server / Administrator |
 | `/channel` | Show the current channel and settings | Admin or configured-channel access |
 | `/logs enable` | Enable configured event types | Manage Server / Administrator |

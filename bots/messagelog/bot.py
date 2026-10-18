@@ -62,6 +62,7 @@ FEEDBACK_OWNER_IDS = env_id_set(
 )
 FEEDBACK_EMOJI = discord.PartialEmoji(name="feedback", id=1561422992112877638)
 FEEDBACK_COOLDOWN_SECONDS = 24 * 60 * 60
+MANAGED_LOG_CHANNEL_TOPIC = "Private message event logs managed by MessageLog."
 STARTED_AT = time.monotonic()
 DB = Database()
 
@@ -103,6 +104,7 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 _log_send_locks: dict[int, asyncio.Lock] = {}
+_channel_create_locks: dict[int, asyncio.Lock] = {}
 _snipe_cache: dict[tuple[int, int], dict[str, Any]] = {}
 _feedback_views_loaded = False
 
@@ -443,22 +445,54 @@ async def record_config_change(
     )
 
 
-async def create_log_channel(guild: discord.Guild) -> discord.TextChannel:
-    me = guild.me
-    if not me or not me.guild_permissions.manage_channels:
-        raise PermissionError("The bot needs **Manage Channels** to create a log channel.")
-    overwrites = {
-        guild.default_role: discord.PermissionOverwrite(view_channel=False),
-        me: discord.PermissionOverwrite(
-            view_channel=True, send_messages=True, embed_links=True, read_message_history=True
-        ),
-    }
-    return await guild.create_text_channel(
-        "message-logs",
-        topic="Private message event logs managed by MessageLog.",
-        overwrites=overwrites,
-        reason="MessageLog logging channel setup",
-    )
+async def create_log_channel(
+    guild: discord.Guild,
+) -> tuple[discord.TextChannel, bool, bool]:
+    """Reuse the server's log channel, creating one only when none exists.
+
+    Returns the channel, whether it was created now, and whether it was already
+    configured as this server's current logging destination.
+    """
+    lock = _channel_create_locks.setdefault(guild.id, asyncio.Lock())
+    async with lock:
+        config = await DB.get_config(guild.id)
+        configured = await resolve_log_channel(guild, config.get("channel_id"))
+        if configured:
+            return configured, False, True
+
+        managed_channels = sorted(
+            (
+                channel for channel in guild.text_channels
+                if channel.topic == MANAGED_LOG_CHANNEL_TOPIC
+            ),
+            key=lambda channel: channel.id,
+        )
+        if managed_channels:
+            if len(managed_channels) > 1:
+                log.warning(
+                    "Found %d existing MessageLog channels in guild %s; reusing channel %s",
+                    len(managed_channels),
+                    guild.id,
+                    managed_channels[0].id,
+                )
+            return managed_channels[0], False, False
+
+        me = guild.me
+        if not me or not me.guild_permissions.manage_channels:
+            raise PermissionError("The bot needs **Manage Channels** to create a log channel.")
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            me: discord.PermissionOverwrite(
+                view_channel=True, send_messages=True, embed_links=True, read_message_history=True
+            ),
+        }
+        channel = await guild.create_text_channel(
+            "message-logs",
+            topic=MANAGED_LOG_CHANNEL_TOPIC,
+            overwrites=overwrites,
+            reason="MessageLog logging channel setup",
+        )
+        return channel, True, False
 
 
 async def setup_channel(guild: discord.Guild, channel: discord.TextChannel) -> str | None:
@@ -997,12 +1031,29 @@ class ConfigView(discord.ui.View):
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
-            channel = await create_log_channel(interaction.guild)
-            await setup_channel(interaction.guild, channel)
+            channel, created, already_configured = await create_log_channel(interaction.guild)
+            if already_configured:
+                await interaction.followup.send(
+                    f"This server already has a logging channel: {channel.mention}. "
+                    "No duplicate was created. Use `/logs enable` to resume logging or "
+                    "`/set channel` to choose a different one.",
+                    ephemeral=True,
+                )
+                return
+            error = await setup_channel(interaction.guild, channel)
+            if error:
+                await interaction.followup.send(error, ephemeral=True)
+                return
             await DB.update_config(interaction.guild.id, enabled=True)
-            await interaction.followup.send(f"Created and configured {channel.mention}.", ephemeral=True)
+            action = "Created" if created else "Reused the existing"
+            await interaction.followup.send(
+                f"{action} logging channel {channel.mention} and enabled logging.",
+                ephemeral=True,
+            )
             await record_config_change(
-                interaction.guild, interaction.user, f"Created logging channel {channel.mention}."
+                interaction.guild,
+                interaction.user,
+                f"{action} logging channel {channel.mention}.",
             )
         except (PermissionError, discord.Forbidden, discord.HTTPException) as exc:
             await interaction.followup.send(str(exc) or "I couldn't create the channel.", ephemeral=True)
@@ -1355,11 +1406,30 @@ async def create_channel_command(interaction: discord.Interaction):
         return
     await interaction.response.defer(ephemeral=True, thinking=True)
     try:
-        channel = await create_log_channel(interaction.guild)
-        await setup_channel(interaction.guild, channel)
+        channel, created, already_configured = await create_log_channel(interaction.guild)
+        if already_configured:
+            await interaction.followup.send(
+                f"This server already has a logging channel: {channel.mention}. "
+                "No duplicate was created. Use `/logs enable` to resume logging or "
+                "`/set channel` to choose a different one.",
+                ephemeral=True,
+            )
+            return
+        error = await setup_channel(interaction.guild, channel)
+        if error:
+            await interaction.followup.send(error, ephemeral=True)
+            return
         await DB.update_config(interaction.guild.id, enabled=True)
-        await interaction.followup.send(f"Created and configured {channel.mention}.", ephemeral=True)
-        await record_config_change(interaction.guild, interaction.user, f"Created logging channel {channel.mention}.")
+        action = "Created" if created else "Reused the existing"
+        await interaction.followup.send(
+            f"{action} logging channel {channel.mention} and enabled logging.",
+            ephemeral=True,
+        )
+        await record_config_change(
+            interaction.guild,
+            interaction.user,
+            f"{action} logging channel {channel.mention}.",
+        )
     except (PermissionError, discord.Forbidden, discord.HTTPException) as exc:
         await interaction.followup.send(str(exc) or "I couldn't create the channel.", ephemeral=True)
 
