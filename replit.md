@@ -38,7 +38,7 @@ MessageLog is a Discord server utility bot for logging deleted and edited messag
 
 ## Product
 
-Per-server message logging with 20 slash commands, private configuration, event search/history, and interactive Discord embeds.
+Per-server message logging with 22 slash commands, private configuration, event search/history, cached deletion sniping, and owner-routed feedback with replies.
 
 ## User preferences
 

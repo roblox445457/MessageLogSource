@@ -30,6 +30,38 @@ log = logging.getLogger("messagelog")
 BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "")
 SUPPORT_URL = os.getenv("SUPPORT_URL", "").strip()
 BOT_VERSION = os.getenv("BOT_VERSION", "1.0.0")
+
+
+def env_id(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        return int(value.strip())
+    except ValueError:
+        log.warning("Ignoring invalid integer value for %s", name)
+        return default
+
+
+def env_id_set(name: str, defaults: set[int]) -> set[int]:
+    value = os.getenv(name)
+    if value is None:
+        return set(defaults)
+    try:
+        return {int(item.strip()) for item in value.split(",") if item.strip()}
+    except ValueError:
+        log.warning("Ignoring invalid ID list for %s", name)
+        return set(defaults)
+
+
+FEEDBACK_GUILD_ID = env_id("FEEDBACK_GUILD_ID", 1561421141636157541)
+FEEDBACK_CHANNEL_ID = env_id("FEEDBACK_CHANNEL_ID", 1561421143636971562)
+FEEDBACK_OWNER_IDS = env_id_set(
+    "FEEDBACK_OWNER_IDS",
+    {1230660770749087796, 1354784283796967444},
+)
+FEEDBACK_EMOJI = discord.PartialEmoji(name="feedback", id=1561422992112877638)
+FEEDBACK_COOLDOWN_SECONDS = 24 * 60 * 60
 STARTED_AT = time.monotonic()
 DB = Database()
 
@@ -70,6 +102,8 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 _log_send_locks: dict[int, asyncio.Lock] = {}
+_snipe_cache: dict[tuple[int, int], dict[str, Any]] = {}
+_feedback_views_loaded = False
 
 
 def clip(value: str | None, limit: int = 1000) -> str:
@@ -94,6 +128,7 @@ def stamp(value: str | None) -> str:
 def attachments_from_message(message: discord.Message) -> list[dict[str, Any]]:
     return [
         {
+            "id": item.id,
             "filename": item.filename,
             "url": item.url,
             "content_type": item.content_type,
@@ -106,6 +141,7 @@ def attachments_from_message(message: discord.Message) -> list[dict[str, Any]]:
 def attachments_from_payload(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         {
+            "id": item.get("id"),
             "filename": item.get("filename", "attachment"),
             "url": item.get("url"),
             "content_type": item.get("content_type"),
@@ -113,6 +149,54 @@ def attachments_from_payload(items: list[dict[str, Any]]) -> list[dict[str, Any]
         }
         for item in items
     ]
+
+
+def attachment_fingerprint(items: list[dict[str, Any]]) -> tuple[tuple[Any, ...], ...]:
+    return tuple(sorted(
+        (
+            str(item.get("id") or ""),
+            str(item.get("filename") or ""),
+            str(item.get("url") or ""),
+            str(item.get("content_type") or ""),
+            int(item.get("size") or 0),
+        )
+        for item in items
+    ))
+
+
+def verified_edit_changes(
+    before: discord.Message | None, payload: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Return changed, comparable fields only when a cached before-state exists."""
+    if before is None:
+        return None
+
+    content_changed = (
+        "content" in payload
+        and payload["content"] is not None
+        and payload["content"] != before.content
+    )
+    old_attachments = attachments_from_message(before)
+    new_attachments = (
+        attachments_from_payload(payload["attachments"])
+        if "attachments" in payload
+        else old_attachments
+    )
+    attachments_changed = (
+        "attachments" in payload
+        and attachment_fingerprint(new_attachments)
+        != attachment_fingerprint(old_attachments)
+    )
+    if not content_changed and not attachments_changed:
+        return None
+
+    return {
+        "content": payload.get("content", before.content),
+        "previous_content": before.content,
+        "attachments": new_attachments,
+        "content_changed": content_changed,
+        "attachments_changed": attachments_changed,
+    }
 
 
 def new_embed(title: str, description: str | None = None, color=CHARCOAL) -> discord.Embed:
@@ -195,7 +279,10 @@ def config_embed(guild: discord.Guild, config: dict[str, Any]) -> discord.Embed:
         ("member_leave", "Member leaves"),
     ) if config["event_types"].get(key, False)]
     embed = new_embed(f"{EMOJI['config']}  Configuration")
-    embed.description = "Manage this server's message logging settings."
+    embed.description = (
+        "Choose whether to log message deletions, verified edits, bulk deletions, "
+        "member joins, and member leaves. Newly sent messages are never logged."
+    )
     embed.add_field(name="Logging channel", value=channel_text, inline=True)
     embed.add_field(
         name="Status",
@@ -613,7 +700,8 @@ def help_embed(category: str = "Overview") -> discord.Embed:
             "`/message search query:keyword member:@user` — filter records.\n"
             "`/message history member:@user` — browse activity.\n"
             "`/message edits message_id:123456789` — review edits.\n"
-            "`/message deleted` — browse deletion records.\n\n"
+            "`/message deleted` — browse deletion records.\n"
+            "`/snipe` — privately view the latest cached deletion in this channel.\n\n"
             "**Permission:** Manage Server or access to the configured log channel."
         ),
         "Members": (
@@ -627,8 +715,10 @@ def help_embed(category: str = "Overview") -> discord.Embed:
             "`/help` — open this interactive command guide.\n"
             "`/info` — show version, uptime, and latency.\n"
             "`/support` — open command and setup help.\n"
+            "`/feedback` — send feedback to the MessageLog team.\n"
             "`/config` — open interactive server settings.\n\n"
-            "`/config` requires Manage Server or Administrator."
+            "`/config` requires Manage Server or Administrator. "
+            "Newly sent messages are never logged."
         ),
     }
     embed = new_embed(f"{EMOJI['info']}  MessageLog command guide")
@@ -675,6 +765,15 @@ class HelpView(discord.ui.View):
     )
     async def close(self, interaction: discord.Interaction, _: discord.ui.Button):
         await interaction.response.edit_message(content="Help closed.", embed=None, view=None)
+
+    @discord.ui.button(
+        label="Send Feedback",
+        style=discord.ButtonStyle.success,
+        emoji=FEEDBACK_EMOJI,
+        row=1,
+    )
+    async def send_feedback(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_modal(FeedbackModal())
 
 
 def support_embed() -> discord.Embed:
@@ -753,6 +852,14 @@ class SupportView(discord.ui.View):
     async def close(self, interaction: discord.Interaction, _: discord.ui.Button):
         await interaction.response.edit_message(content="Support closed.", embed=None, view=None)
 
+    @discord.ui.button(
+        label="Send Feedback",
+        style=discord.ButtonStyle.success,
+        emoji=FEEDBACK_EMOJI,
+    )
+    async def send_feedback(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_modal(FeedbackModal())
+
 
 class SetChannelModal(discord.ui.Modal, title="Set logging channel"):
     channel_id = discord.ui.TextInput(
@@ -787,19 +894,20 @@ class SetChannelModal(discord.ui.Modal, title="Set logging channel"):
 class ConfigEventSelect(discord.ui.Select):
     def __init__(self, event_types: dict[str, bool]):
         labels = [
-            ("message_delete", "Message deletions"),
-            ("message_edit", "Message edits"),
-            ("bulk_delete", "Bulk deletions"),
-            ("member_join", "Member joins"),
-            ("member_leave", "Member leaves"),
+            ("message_delete", "Message deletions", "Log deleted messages when Discord provides them."),
+            ("message_edit", "Message edits", "Log only verified text or attachment changes."),
+            ("bulk_delete", "Bulk deletions", "Log messages removed in a bulk-delete action."),
+            ("member_join", "Member joins", "Log when a member joins this server."),
+            ("member_leave", "Member leaves", "Log when a member leaves this server."),
         ]
         options = [
             discord.SelectOption(
                 label=label,
                 value=key,
+                description=description,
                 default=bool(event_types.get(key, False)),
             )
-            for key, label in labels
+            for key, label, description in labels
         ]
         super().__init__(
             placeholder="Choose which events to track",
@@ -913,6 +1021,305 @@ async def update_and_log(
     config = await DB.update_config(interaction.guild.id, **changes)
     await record_config_change(interaction.guild, interaction.user, description)
     return config
+
+
+class FeedbackDeliveryError(RuntimeError):
+    pass
+
+
+async def resolve_feedback_channel() -> discord.TextChannel:
+    guild = bot.get_guild(FEEDBACK_GUILD_ID)
+    if guild is None:
+        try:
+            guild = await bot.fetch_guild(FEEDBACK_GUILD_ID)
+        except discord.HTTPException as exc:
+            raise FeedbackDeliveryError(
+                "The configured feedback server is unavailable to the bot."
+            ) from exc
+
+    channel = bot.get_channel(FEEDBACK_CHANNEL_ID)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(FEEDBACK_CHANNEL_ID)
+        except discord.HTTPException as exc:
+            raise FeedbackDeliveryError(
+                "The configured feedback channel could not be found."
+            ) from exc
+    if not isinstance(channel, discord.TextChannel) or channel.guild.id != FEEDBACK_GUILD_ID:
+        raise FeedbackDeliveryError(
+            "The configured feedback destination must be a text channel in the feedback server."
+        )
+
+    bot_member = guild.me
+    if bot_member is None and bot.user is not None:
+        bot_member = guild.get_member(bot.user.id)
+    if bot_member is None:
+        raise FeedbackDeliveryError(
+            "The bot could not confirm its permissions in the feedback server."
+        )
+    permissions = channel.permissions_for(bot_member)
+    if not (permissions.view_channel and permissions.send_messages and permissions.embed_links):
+        raise FeedbackDeliveryError(
+            "The bot needs View Channel, Send Messages, and Embed Links in the feedback channel."
+        )
+    return channel
+
+
+def feedback_submission_embed(row: dict[str, Any]) -> discord.Embed:
+    embed = new_embed(f"{EMOJI['support']}  MessageLog feedback", color=BLUE)
+    embed.description = row["content"][:4000]
+    embed.add_field(
+        name="Submitted by",
+        value=f"{row['user_name']} (`{row['user_id']}`)",
+        inline=False,
+    )
+    embed.add_field(
+        name="Origin",
+        value=row.get("source_guild_name") or "Direct message",
+        inline=True,
+    )
+    embed.add_field(name="Submission", value=f"`#{row['id']}`", inline=True)
+    embed.set_footer(text=f"Submitted {stamp(row.get('submitted_at'))}")
+    return embed
+
+
+async def deliver_feedback(feedback_id: int) -> None:
+    row = await DB.get_feedback(feedback_id)
+    if not row or row.get("delivery_message_id"):
+        return
+    channel = await resolve_feedback_channel()
+    view = FeedbackReplyView(feedback_id)
+    try:
+        message = await channel.send(
+            embed=feedback_submission_embed(row),
+            view=view,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+    except discord.HTTPException as exc:
+        raise FeedbackDeliveryError(
+            "Discord did not accept the feedback message."
+        ) from exc
+    await DB.mark_feedback_delivered(feedback_id, message.id)
+    bot.add_view(view, message_id=message.id)
+
+
+class FeedbackModal(discord.ui.Modal, title="Send feedback to MessageLog"):
+    feedback = discord.ui.TextInput(
+        label="Your feedback",
+        placeholder="Tell us what is working or what could be better.",
+        style=discord.TextStyle.paragraph,
+        min_length=5,
+        max_length=1800,
+        required=True,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            content = str(self.feedback).strip()
+            if len(content) < 5:
+                await interaction.followup.send(
+                    "Please enter at least five non-space characters of feedback.",
+                    ephemeral=True,
+                )
+                return
+            feedback_id, remaining = await DB.create_feedback(
+                user_id=interaction.user.id,
+                user_name=str(interaction.user),
+                source_guild_id=interaction.guild.id if interaction.guild else None,
+                source_guild_name=interaction.guild.name if interaction.guild else None,
+                content=content,
+                cooldown_seconds=FEEDBACK_COOLDOWN_SECONDS,
+            )
+            if feedback_id is None:
+                hours, minutes = divmod((remaining + 59) // 60, 60)
+                duration = f"{hours}h" + (f" {minutes}m" if minutes else "")
+                await interaction.followup.send(
+                    f"Thanks for the feedback you already sent. You can submit again in "
+                    f"about {duration} (one submission every 24 hours).",
+                    ephemeral=True,
+                )
+                return
+            try:
+                await deliver_feedback(feedback_id)
+            except FeedbackDeliveryError:
+                log.exception("Feedback #%s is saved but could not be routed", feedback_id)
+                await interaction.followup.send(
+                    f"Your feedback was saved as submission **#{feedback_id}**, but I "
+                    "couldn’t forward it to the team right now. It will be retried when "
+                    "the bot reconnects. Your 24-hour submission limit is in effect.",
+                    ephemeral=True,
+                )
+                return
+            await interaction.followup.send(
+                f"Thank you. Your feedback was sent to the MessageLog team as "
+                f"submission **#{feedback_id}**.",
+                ephemeral=True,
+            )
+        except Exception:
+            log.exception("Could not save a feedback submission")
+            await interaction.followup.send(
+                "I couldn't save your feedback right now. Please try again later.",
+                ephemeral=True,
+            )
+
+
+class FeedbackReplyModal(discord.ui.Modal):
+    def __init__(self, feedback_id: int):
+        super().__init__(title=f"Reply to feedback #{feedback_id}")
+        self.feedback_id = feedback_id
+        self.reply_text = discord.ui.TextInput(
+            label="Your response",
+            placeholder="Write a helpful reply for the person who submitted this.",
+            style=discord.TextStyle.paragraph,
+            min_length=1,
+            max_length=1500,
+            required=True,
+        )
+        self.add_item(self.reply_text)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if interaction.user.id not in FEEDBACK_OWNER_IDS:
+            await interaction.response.send_message(
+                "Only configured MessageLog owners can reply to feedback.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        row = await DB.get_feedback(self.feedback_id)
+        if not row:
+            await interaction.followup.send(
+                "That feedback submission is no longer available.", ephemeral=True
+            )
+            return
+        if row.get("replied_at"):
+            await interaction.followup.send(
+                "A reply has already been sent for this submission.", ephemeral=True
+            )
+            return
+
+        reply = str(self.reply_text).strip()
+        user = bot.get_user(row["user_id"])
+        try:
+            if user is None:
+                user = await bot.fetch_user(row["user_id"])
+            dm = new_embed(
+                f"{EMOJI['support']}  A reply to your MessageLog feedback",
+                f"The MessageLog team has responded to your feedback:\n\n{reply}",
+                color=BLUE,
+            )
+            dm.add_field(
+                name="Your feedback",
+                value=clip(row["content"], 1000),
+                inline=False,
+            )
+            dm.set_footer(text=f"Feedback submission #{self.feedback_id}")
+            await user.send(
+                embed=dm,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.HTTPException:
+            await interaction.followup.send(
+                "I couldn't deliver the DM. The feedback submission is still saved and "
+                "the reply button remains available; the user may need to allow DMs "
+                "from the bot.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            await DB.mark_feedback_replied(
+                self.feedback_id,
+                reply,
+                interaction.user.id,
+            )
+        except Exception:
+            log.exception(
+                "DM delivered for feedback #%s, but its reply status was not saved",
+                self.feedback_id,
+            )
+            await interaction.followup.send(
+                "The DM was delivered, but I couldn't save the reply status. "
+                "Avoid sending another reply for this submission.",
+                ephemeral=True,
+            )
+            return
+        await interaction.followup.send(
+            "Your reply was sent to the feedback submitter by DM.", ephemeral=True
+        )
+
+
+class FeedbackReplyView(discord.ui.View):
+    def __init__(self, feedback_id: int):
+        super().__init__(timeout=None)
+        self.feedback_id = feedback_id
+        reply_button = discord.ui.Button(
+            label="Reply to user",
+            style=discord.ButtonStyle.primary,
+            emoji=FEEDBACK_EMOJI,
+            custom_id=f"messagelog:feedback:reply:{feedback_id}",
+        )
+        reply_button.callback = self.open_reply
+        self.add_item(reply_button)
+
+    async def open_reply(self, interaction: discord.Interaction):
+        if interaction.user.id not in FEEDBACK_OWNER_IDS:
+            await interaction.response.send_message(
+                "Only configured MessageLog owners can reply to feedback.",
+                ephemeral=True,
+            )
+            return
+        row = await DB.get_feedback(self.feedback_id)
+        if not row:
+            await interaction.response.send_message(
+                "That feedback submission is no longer available.", ephemeral=True
+            )
+            return
+        if row.get("replied_at"):
+            await interaction.response.send_message(
+                "A reply has already been sent for this submission.", ephemeral=True
+            )
+            return
+        await interaction.response.send_modal(FeedbackReplyModal(self.feedback_id))
+
+
+def cache_snipe(
+    guild: discord.Guild,
+    channel_id: int,
+    message_id: int,
+    message: discord.Message | None,
+) -> None:
+    channel = guild.get_channel(channel_id)
+    author = message.author if message else None
+    cached_attachments = attachments_from_message(message) if message else []
+    note = None
+    if not message:
+        note = (
+            "This deleted message was not in the bot's cache. Discord did not provide "
+            "its text, author, or attachments."
+        )
+    elif not message.content and not cached_attachments:
+        note = "Discord provided no text or attachments for this deleted message."
+    _snipe_cache[(guild.id, channel_id)] = {
+        "id": None,
+        "guild_id": guild.id,
+        "message_id": message_id,
+        "event_type": "message_delete",
+        "author_id": author.id if author else None,
+        "author_name": str(author) if author else None,
+        "channel_id": channel_id,
+        "channel_name": getattr(channel, "name", None),
+        "content": message.content if message else None,
+        "previous_content": None,
+        "attachments": cached_attachments,
+        "event_at": datetime.now(timezone.utc).isoformat(),
+        "metadata": {
+            "note": note,
+            "avatar_url": author.display_avatar.url if author else None,
+            "message_created_at": message.created_at.isoformat() if message else None,
+            "jump_url": message.jump_url if message else None,
+        },
+    }
 
 
 # ---- Slash command groups -------------------------------------------------
@@ -1213,6 +1620,35 @@ async def support_command(interaction: discord.Interaction):
     )
 
 
+@bot.tree.command(name="feedback", description="Send feedback to the MessageLog team")
+async def feedback_command(interaction: discord.Interaction):
+    await interaction.response.send_modal(FeedbackModal())
+
+
+@bot.tree.command(
+    name="snipe",
+    description="Privately view the latest deleted message captured in this channel",
+)
+async def snipe_command(interaction: discord.Interaction):
+    if not interaction.guild or not interaction.channel_id:
+        await interaction.response.send_message(
+            "This command is only available in a server channel.", ephemeral=True
+        )
+        return
+    row = _snipe_cache.get((interaction.guild.id, interaction.channel_id))
+    if not row:
+        await interaction.response.send_message(
+            "No deleted message has been captured in this channel since the bot started. "
+            "Deleted content is only available when Discord had the message in the bot's cache.",
+            ephemeral=True,
+        )
+        return
+    embed = event_embed(row, interaction.guild)
+    embed.title = "Latest deleted message"
+    embed.set_footer(text="Snipe • Captured from the bot's live message cache")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 @bot.tree.command(name="config", description="Open the interactive server logging configuration panel")
 @app_commands.default_permissions(manage_guild=True)
 async def config_command(interaction: discord.Interaction):
@@ -1230,13 +1666,14 @@ async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
     guild = bot.get_guild(payload.guild_id) if payload.guild_id else None
     if not guild:
         return
+    message = payload.cached_message
+    channel = guild.get_channel(payload.channel_id)
+    cache_snipe(guild, payload.channel_id, payload.message_id, message)
     config = await DB.get_config(guild.id)
     if not config["enabled"] or not config["event_types"].get("message_delete", False):
         return
-    message = payload.cached_message
     content = message.content if message else None
     author = message.author if message else None
-    channel = guild.get_channel(payload.channel_id)
     metadata = {
         "note": None if message else (
             "Message was not in the bot's cache; Discord did not provide its content or author."
@@ -1264,10 +1701,24 @@ async def on_raw_bulk_message_delete(payload: discord.RawBulkMessageDeleteEvent)
     guild = bot.get_guild(payload.guild_id) if payload.guild_id else None
     if not guild:
         return
+    channel = guild.get_channel(payload.channel_id)
+    cached_messages = list(payload.cached_messages)
+    if cached_messages:
+        latest_cached = max(
+            cached_messages,
+            key=lambda message: (message.created_at, message.id),
+        )
+        cache_snipe(guild, payload.channel_id, latest_cached.id, latest_cached)
+    elif payload.message_ids:
+        cache_snipe(
+            guild,
+            payload.channel_id,
+            max(payload.message_ids),
+            None,
+        )
     config = await DB.get_config(guild.id)
     if not config["enabled"] or not config["event_types"].get("bulk_delete", False):
         return
-    channel = guild.get_channel(payload.channel_id)
     cached = {message.id: message for message in payload.cached_messages}
     for message_id in payload.message_ids:
         message = cached.get(message_id)
@@ -1297,20 +1748,32 @@ async def on_raw_message_edit(payload: discord.RawMessageUpdateEvent):
     guild = bot.get_guild(payload.guild_id) if payload.guild_id else None
     if not guild:
         return
+    before = payload.cached_message
+    data = payload.data
+    changes = verified_edit_changes(before, data)
+    if changes is None:
+        log.debug(
+            "Ignoring message update without a verifiable content or attachment change "
+            "(guild=%s, message=%s)",
+            guild.id,
+            payload.message_id,
+        )
+        return
     config = await DB.get_config(guild.id)
     if not config["enabled"] or not config["event_types"].get("message_edit", False):
         return
-    before = payload.cached_message
-    data = payload.data
-    content = data.get("content")
-    old_content = before.content if before else None
     author = before.author if before else None
     author_data = data.get("author") or {}
     author_id = author.id if author else author_data.get("id")
     author_name = str(author) if author else author_data.get("username")
     channel = guild.get_channel(payload.channel_id)
-    new_attachments = data.get("attachments") or []
     avatar_url = author.display_avatar.url if author else None
+    if changes["content_changed"] and changes["attachments_changed"]:
+        change_note = "Message text and attachments changed."
+    elif changes["attachments_changed"]:
+        change_note = "Attachments changed; message text was unchanged."
+    else:
+        change_note = None
     await persist_and_post(
         guild,
         "message_edit",
@@ -1319,13 +1782,11 @@ async def on_raw_message_edit(payload: discord.RawMessageUpdateEvent):
         author_name=author_name,
         channel_id=payload.channel_id,
         channel_name=getattr(channel, "name", None),
-        content=content if content is not None else (before.content if before else None),
-        previous_content=old_content,
-        attachments=attachments_from_payload(new_attachments) if new_attachments else (
-            attachments_from_message(before) if before else []
-        ),
+        content=changes["content"],
+        previous_content=changes["previous_content"],
+        attachments=changes["attachments"],
         metadata={
-            "note": None if before else "The previous version was not cached; only fields supplied by Discord are shown.",
+            "note": change_note,
             "avatar_url": avatar_url,
             "jump_url": before.jump_url if before else None,
             "message_created_at": before.created_at.isoformat() if before else data.get("timestamp"),
@@ -1393,6 +1854,26 @@ async def on_ready():
             log.info("Registered %d global application commands", len(synced))
         except discord.HTTPException:
             log.exception("Command registration failed")
+    global _feedback_views_loaded
+    try:
+        if not _feedback_views_loaded:
+            for row in await DB.get_pending_feedback_replies():
+                bot.add_view(
+                    FeedbackReplyView(row["id"]),
+                    message_id=row["delivery_message_id"],
+                )
+            _feedback_views_loaded = True
+        for row in await DB.get_undelivered_feedback():
+            try:
+                await deliver_feedback(row["id"])
+            except FeedbackDeliveryError as exc:
+                log.warning(
+                    "Feedback #%s remains saved but undelivered: %s",
+                    row["id"],
+                    exc,
+                )
+    except Exception:
+        log.exception("Feedback delivery recovery failed")
     log.info("Logged in as %s (id=%s)", bot.user, bot.user.id if bot.user else "unknown")
 
 

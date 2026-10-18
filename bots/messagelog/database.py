@@ -55,6 +55,29 @@ class Database:
                     metadata TEXT NOT NULL DEFAULT '{}'
                 )
             """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS feedback_submissions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    user_name TEXT NOT NULL,
+                    source_guild_id INTEGER,
+                    source_guild_name TEXT,
+                    content TEXT NOT NULL,
+                    submitted_at TEXT NOT NULL,
+                    delivery_message_id INTEGER,
+                    reply_text TEXT,
+                    replied_at TEXT,
+                    replied_by INTEGER
+                )
+            """)
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_feedback_user_time "
+                "ON feedback_submissions(user_id, submitted_at DESC)"
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_feedback_delivery "
+                "ON feedback_submissions(delivery_message_id, replied_at)"
+            )
             await db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_logs_guild_time "
                 "ON message_logs(guild_id, event_at DESC)"
@@ -229,3 +252,107 @@ class Database:
         return await self.query(
             " AND ".join(clauses), tuple(params), limit=limit
         )
+
+    async def create_feedback(
+        self,
+        *,
+        user_id: int,
+        user_name: str,
+        source_guild_id: int | None,
+        source_guild_name: str | None,
+        content: str,
+        cooldown_seconds: int = 24 * 60 * 60,
+    ) -> tuple[int | None, int]:
+        """Save feedback if this user is outside the rolling cooldown.
+
+        Returns (feedback_id, 0) when accepted, or (None, seconds_remaining)
+        when the user's most recent submission is still inside the cooldown.
+        """
+        submitted_at = datetime.now(timezone.utc)
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            cur = await db.execute(
+                """SELECT submitted_at FROM feedback_submissions
+                   WHERE user_id = ? ORDER BY submitted_at DESC, id DESC LIMIT 1""",
+                (user_id,),
+            )
+            previous = await cur.fetchone()
+            if previous:
+                previous_at = datetime.fromisoformat(previous["submitted_at"])
+                if previous_at.tzinfo is None:
+                    previous_at = previous_at.replace(tzinfo=timezone.utc)
+                elapsed = (submitted_at - previous_at).total_seconds()
+                remaining = cooldown_seconds - elapsed
+                if remaining > 0:
+                    await db.rollback()
+                    return None, int(remaining) + 1
+
+            cur = await db.execute(
+                """INSERT INTO feedback_submissions
+                   (user_id, user_name, source_guild_id, source_guild_name,
+                    content, submitted_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    user_id,
+                    user_name,
+                    source_guild_id,
+                    source_guild_name,
+                    content,
+                    submitted_at.isoformat(),
+                ),
+            )
+            await db.commit()
+            return int(cur.lastrowid), 0
+
+    async def get_feedback(self, feedback_id: int) -> dict[str, Any] | None:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT * FROM feedback_submissions WHERE id = ?",
+                (feedback_id,),
+            )
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def get_undelivered_feedback(self) -> list[dict[str, Any]]:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                """SELECT * FROM feedback_submissions
+                   WHERE delivery_message_id IS NULL ORDER BY id"""
+            )
+            return [dict(row) for row in await cur.fetchall()]
+
+    async def get_pending_feedback_replies(self) -> list[dict[str, Any]]:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                """SELECT * FROM feedback_submissions
+                   WHERE delivery_message_id IS NOT NULL AND replied_at IS NULL
+                   ORDER BY id"""
+            )
+            return [dict(row) for row in await cur.fetchall()]
+
+    async def mark_feedback_delivered(
+        self, feedback_id: int, delivery_message_id: int
+    ) -> None:
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                """UPDATE feedback_submissions SET delivery_message_id = ?
+                   WHERE id = ? AND delivery_message_id IS NULL""",
+                (delivery_message_id, feedback_id),
+            )
+            await db.commit()
+
+    async def mark_feedback_replied(
+        self, feedback_id: int, reply_text: str, replied_by: int
+    ) -> None:
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                """UPDATE feedback_submissions
+                   SET reply_text = ?, replied_at = ?, replied_by = ?
+                   WHERE id = ? AND replied_at IS NULL""",
+                (reply_text, utcnow(), replied_by, feedback_id),
+            )
+            await db.commit()
