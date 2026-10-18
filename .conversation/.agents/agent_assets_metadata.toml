@@ -1,0 +1,16 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "3imMWYJ5-T6WbG3Av_opx"
+uri = "file://MessageLog-source.zip"
+type = "unspecified"
+title = "MessageLog bot source"
+description = "Runnable Discord message logging bot source, SQLite persistence, requirements, environment template, and setup guide."
+logical_id = "99fac9b8-636a-4f36-99bf-14f6546f44c4"
+content_hash = "sha256:f9db837e16d67bed4d4a79ed41eed84a4bb1117b3345b0ff9f0360cbccffb2a1"
+size = 17424
+mtime_ms = 1792341272905
+storage_uri = "gcs://replit-rams-assets-janeway/rams/assets/conversation:f7f3d847-cfba-463d-a9ea-f87aab626f21/99fac9b8-636a-4f36-99bf-14f6546f44c4/a3480770-e6f0-4eb0-b0fc-57a9e939af6c"
+storage_version_token = "1792341276225918"
+content_type = "application/octet-stream"

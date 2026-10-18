@@ -1,0 +1,117 @@
+Build a fully functional Discord bot called MessageLog. This bot is designed to log server messages, provide message history tools, and give server administrators complete control over their logging configuration.
+The bot must feel like a professionally developed Discord utility bot, with a clean, modern, dark aesthetic, high-quality embeds, consistent formatting, and useful interactive components. Do NOT make it look generic, cluttered, or AI-generated.
+Make every embed look clean, polished, and consistent.
+Design style:
+- Dark charcoal, black, and neutral gray aesthetic.
+- Use a consistent embed color system for different categories.
+- Clean spacing, clear hierarchy, short descriptions, and aligned information.
+- Use timestamps, server icons, user avatars, author fields, and footers where appropriate.
+- Use Discord's native buttons, select menus, and slash-command options.
+- Avoid excessive emojis, random decorations, giant descriptions, and unnecessary fields.
+- Make every embed feel like part of the same professional bot.
+I have these custom Discord emojis available:
+- :config: — configuration and settings ID: 1561414242240831570
+- :info: — information, help, and details id: 1561415081038708736
+- :member: — users and member information ID: 1561415094943092736
+- :support: — support and assistance ID: 1561414031255011480
+- :message: — messages and message logs id: 1561415443120656504
+Use these emojis throughout the bot's embeds and interface where appropriate. Use the actual custom emoji IDs when available rather than treating the emoji names as plain text.
+Configuration embed
+- Title: Configuration
+- Show the current logging channel, enabled logging features, and configuration status.
+- Include buttons such as Edit Settings, Set Channel, and View Commands.
+Message log embed
+- Show the message author's avatar, username, user ID, channel, timestamp, and message content.
+- Clearly identify whether a message was deleted, edited, or otherwise logged.
+- For edits, show the original content and updated content separately.
+- Include attachments, image links, and relevant metadata when available.
+- Include buttons for View Message, View User, and View Commands.
+- Handle empty messages, deleted attachments, and unavailable content gracefully.
+Help embed
+- Display commands grouped by category.
+- Include descriptions, usage examples, and required permissions.
+- Add buttons or select menus to navigate between command categories.
+Implement 20 useful slash commands. All commands must work, have proper descriptions, validate their inputs, and return attractive embeds.
+1. /set channel — Set an existing text channel as the logging destination.
+2. /create channel — Create a dedicated message-log channel with appropriate permissions.
+3. /remove channel — Remove the configured logging channel from the bot's settings.
+4. /channel — Display the current logging channel and its configuration.
+5. /logs enable — Enable message logging.
+6. /logs disable — Disable message logging.
+7. /logs status — Show whether logging is enabled and what events are tracked.
+8. /logs test — Send a test log to verify that the configuration works.
+9. /message view — View a logged message when its information is available.
+10. /message search — Search stored logs using supported filters and permission checks.
+11. /message history — View available logged messages for a specified user or channel.
+12. /message edits — View recorded edit history for a message.
+13. /message deleted — Browse available deleted-message records.
+14. /member info — Display useful information about a server member.
+15. /member logs — View available message-log activity associated with a member.
+16. /member count — Show the current server member count.
+17. /help — Open the interactive command guide.
+18. /info — Display bot information, uptime, version, and latency.
+19. /support — Show support resources or a configured support-server link.
+20. /config — Open an interactive configuration panel.
+Use Discord subcommands where appropriate, such as /set channel, /create channel, and /message search. If the chosen Discord library or command framework requires a different internal structure, implement the equivalent valid slash-command hierarchy.
+Every message-log embed should include useful interactive buttons whenever applicable.
+View Message
+- Open a detailed ephemeral embed containing the available recorded message data.
+- Show the original content, author, channel, timestamp, attachments, and edit history when available.
+- If the original message no longer exists, clearly state that the displayed information comes from stored logs.
+- Do not pretend a deleted message can still be opened in Discord.
+View User
+- Display relevant member information and provide navigation to their available logs.
+View Commands
+- Open the help menu or a command list relevant to the current log.
+Additional buttons where useful
+- Previous and Next for paginated log browsing.
+- Back to return to the previous menu.
+- Close to dismiss the interactive view where supported.
+Buttons must actually work. Handle expired interactions, unauthorized users, missing records, and API errors gracefully. Use ephemeral responses for private administrative details where appropriate.
+Implement reliable logging for:
+- Message deletions.
+- Message edits.
+- Message attachments and embeds where accessible.
+- Bulk message deletions when Discord provides the relevant events.
+- Logging configuration changes.
+- Optional member join and leave events if enabled.
+Each log must contain the information available to the bot at the time of the event. Do not claim to capture information that Discord does not provide.
+For deleted messages, store the content only when it was legitimately available to the bot before deletion. Explain limitations involving uncached messages, missing permissions, and attachments that may become inaccessible.
+For edited messages, preserve the previous and updated content when both are available.
+Each Discord server must have its own independent configuration.
+Store settings persistently so they survive bot restarts. Use an appropriate database such as SQLite for a small deployment or PostgreSQL for a larger deployment.
+Configuration should include:
+- Logging channel ID.
+- Logging enabled/disabled state.
+- Enabled event types.
+- Relevant retention settings.
+- Any additional server-specific options.
+The /config command should open a clean interactive settings panel with buttons, select menus, and clear status indicators.
+If no logging channel is configured, explain the problem and offer a clear next step: /set channel or /create channel.
+If a channel is removed or becomes inaccessible, handle that state without crashing the bot.
+- Only authorized administrators may change server configuration.
+- Check permissions on the server side for every sensitive action.
+- Prevent users from accessing logs they are not authorized to view.
+- Respect Discord permissions and the bot's configured access rules.
+- Request only the Gateway Intents and OAuth2 permissions actually needed.
+- Never expose bot tokens, secrets, database credentials, or private configuration.
+- Validate all user inputs and handle missing permissions gracefully.
+- Build real, working functionality rather than UI mockups.
+- Use reusable embed builders and shared button handlers.
+- Keep command registration, event handlers, database operations, and configuration logic organized.
+- Include error handling, useful logs, and setup instructions.
+- Avoid duplicate message logs and duplicate event handlers.
+- Ensure interactions are acknowledged within Discord's response deadlines.
+- Make the bot restart-safe and suitable for deployment.
+Provide:
+1. Complete source code for all 20 commands.
+2. All required message event handlers.
+3. The database schema and persistence implementation.
+4. All embed builders and interactive components.
+5. A .env.example file without real secrets.
+6. A requirements.txt or equivalent dependency manifest.
+7. Setup instructions, Discord Developer Portal configuration, and deployment instructions.
+8. A clear list of required permissions and Gateway Intents.
+9. A complete command reference with usage examples.
+Important: Do not give me partial snippets and claim the bot is finished. Deliver a complete, runnable implementation, explain any Discord API limitations, and ensure every advertised command and button has working behavior.
+The final result should make MessageLog feel like a serious, polished Discord bot with a recognizable visual identity, excellent embeds, useful message-history tools, and a smooth administrative experience.
