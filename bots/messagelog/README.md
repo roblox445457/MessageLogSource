@@ -89,7 +89,7 @@ Only a member with **Manage Server** or **Administrator** can change configurati
 | `/member count` | Show the current server member count | Server members |
 | `/help` | Open the interactive command guide | Server members |
 | `/info` | Show version, uptime, and gateway latency | Server members |
-| `/support` | Show the configured support link, if set | Server members |
+| `/support` | Open command/setup help, with an optional support-server link | Server members |
 | `/config` | Open the interactive settings panel | Manage Server / Administrator |
 
 The configuration panel includes working controls to enable/disable logging, choose tracked event types, set a channel by ID, create a channel, and open the command guide. Log cards include buttons for stored details, member details, and help. Search/history browsers include previous/next navigation, details, and close controls.

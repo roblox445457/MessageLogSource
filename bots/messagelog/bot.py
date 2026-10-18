@@ -46,6 +46,13 @@ EMOJI = {
     "support": "<:support:1561414031255011480>",
     "message": "<:message:1561415443120656504>",
 }
+BUTTON_EMOJI = {
+    "config": discord.PartialEmoji(name="config", id=1561414242240831570),
+    "info": discord.PartialEmoji(name="info", id=1561415081038708736),
+    "member": discord.PartialEmoji(name="member", id=1561415094943092736),
+    "support": discord.PartialEmoji(name="support", id=1561414031255011480),
+    "message": discord.PartialEmoji(name="message", id=1561415443120656504),
+}
 EVENT_LABELS = {
     "message_delete": "Message deleted",
     "message_edit": "Message edited",
@@ -62,6 +69,7 @@ intents.message_content = True
 intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
+_log_send_locks: dict[int, asyncio.Lock] = {}
 
 
 def clip(value: str | None, limit: int = 1000) -> str:
@@ -285,29 +293,53 @@ async def persist_and_post(
 
 
 async def post_stored_log(guild: discord.Guild, row: dict[str, Any]) -> None:
-    config = await DB.get_config(guild.id)
-    if not config.get("channel_id"):
-        return
-    if row["event_type"] != "config_change" and not config.get("enabled"):
-        return
-    if row["event_type"] != "config_change" and not config["event_types"].get(row["event_type"], False):
-        return
-    channel = await resolve_log_channel(guild, config["channel_id"])
-    if not channel:
-        log.warning("Configured log channel is missing or inaccessible for guild %s", guild.id)
-        return
-    permissions = channel.permissions_for(guild.me) if guild.me else None
-    if not permissions or not (permissions.view_channel and permissions.send_messages and permissions.embed_links):
-        log.warning("Missing log-channel permissions in guild %s", guild.id)
-        return
-    try:
-        await channel.send(
-            embed=event_embed(row, guild),
-            view=LogActionsView(bot, row["id"]),
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
-    except discord.HTTPException:
-        log.exception("Failed to post a log in guild %s", guild.id)
+    lock = _log_send_locks.setdefault(guild.id, asyncio.Lock())
+    async with lock:
+        config = await DB.get_config(guild.id)
+        if not config.get("channel_id"):
+            return
+        if row["event_type"] != "config_change" and not config.get("enabled"):
+            return
+        if row["event_type"] != "config_change" and not config["event_types"].get(row["event_type"], False):
+            return
+        channel = await resolve_log_channel(guild, config["channel_id"])
+        if not channel:
+            await DB.update_config(guild.id, channel_id=None, enabled=False)
+            log.warning(
+                "Configured log channel is missing; disabled logging for guild %s",
+                guild.id,
+            )
+            return
+        permissions = channel.permissions_for(guild.me) if guild.me else None
+        if not permissions or not (
+            permissions.view_channel and permissions.send_messages and permissions.embed_links
+        ):
+            await DB.update_config(guild.id, enabled=False)
+            log.warning(
+                "Missing log-channel permissions; disabled logging for guild %s",
+                guild.id,
+            )
+            return
+        try:
+            await channel.send(
+                embed=event_embed(row, guild),
+                view=LogActionsView(bot, row["id"]),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.NotFound:
+            await DB.update_config(guild.id, channel_id=None, enabled=False)
+            log.warning(
+                "Discord no longer has the configured log channel; disabled logging for guild %s",
+                guild.id,
+            )
+        except discord.Forbidden:
+            await DB.update_config(guild.id, enabled=False)
+            log.warning(
+                "Discord denied access to the configured log channel; disabled logging for guild %s",
+                guild.id,
+            )
+        except discord.HTTPException:
+            log.exception("Failed to post a log in guild %s", guild.id)
 
 
 async def record_config_change(
@@ -381,7 +413,11 @@ class LogActionsView(discord.ui.View):
             return None
         return await DB.get_log(interaction.guild.id, self.log_id)
 
-    @discord.ui.button(label="View Message", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(
+        label="View Message",
+        style=discord.ButtonStyle.secondary,
+        emoji=BUTTON_EMOJI["message"],
+    )
     async def view_message(self, interaction: discord.Interaction, _: discord.ui.Button):
         row = await self.fetch_row(interaction)
         if not row:
@@ -414,13 +450,18 @@ class LogActionsView(discord.ui.View):
                 embed.add_field(name="Edit history", value="Showing the 3 most recent recorded edit events.", inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @discord.ui.button(label="View User", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(
+        label="View User",
+        style=discord.ButtonStyle.secondary,
+        emoji=BUTTON_EMOJI["member"],
+    )
     async def view_user(self, interaction: discord.Interaction, _: discord.ui.Button):
         row = await self.fetch_row(interaction)
         if not row:
             if not interaction.response.is_done():
                 await interaction.response.send_message("That stored log is no longer available.", ephemeral=True)
             return
+        await interaction.response.defer(ephemeral=True, thinking=True)
         member = interaction.guild.get_member(row["author_id"]) if row.get("author_id") else None
         user = member
         if not user and row.get("author_id"):
@@ -441,9 +482,13 @@ class LogActionsView(discord.ui.View):
         ) if row.get("author_id") else []
         user_embed.add_field(name="Recent stored activity", value=f"{len(history)} record(s) shown in this server.", inline=False)
         view = MemberActivityView(self.client, row.get("author_id")) if row.get("author_id") else None
-        await interaction.response.send_message(embed=user_embed, view=view, ephemeral=True)
+        await interaction.followup.send(embed=user_embed, view=view, ephemeral=True)
 
-    @discord.ui.button(label="View Commands", style=discord.ButtonStyle.primary)
+    @discord.ui.button(
+        label="View Commands",
+        style=discord.ButtonStyle.primary,
+        emoji=BUTTON_EMOJI["info"],
+    )
     async def view_commands(self, interaction: discord.Interaction, _: discord.ui.Button):
         await interaction.response.send_message(
             embed=help_embed("Messages"), view=HelpView(), ephemeral=True
@@ -470,7 +515,11 @@ class LogPager(discord.ui.View):
         embed.set_footer(text=f"Record {self.index + 1} of {len(self.rows)} • MessageLog")
         return embed
 
-    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(
+        label="Previous",
+        style=discord.ButtonStyle.secondary,
+        emoji=BUTTON_EMOJI["message"],
+    )
     async def previous(self, interaction: discord.Interaction, _: discord.ui.Button):
         self.index = max(0, self.index - 1)
         self._sync_buttons()
@@ -478,7 +527,11 @@ class LogPager(discord.ui.View):
             embed=self.current_embed(interaction.guild), view=self
         )
 
-    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(
+        label="Next",
+        style=discord.ButtonStyle.secondary,
+        emoji=BUTTON_EMOJI["message"],
+    )
     async def next(self, interaction: discord.Interaction, _: discord.ui.Button):
         self.index = min(len(self.rows) - 1, self.index + 1)
         self._sync_buttons()
@@ -486,7 +539,11 @@ class LogPager(discord.ui.View):
             embed=self.current_embed(interaction.guild), view=self
         )
 
-    @discord.ui.button(label="Details", style=discord.ButtonStyle.primary)
+    @discord.ui.button(
+        label="Details",
+        style=discord.ButtonStyle.primary,
+        emoji=BUTTON_EMOJI["info"],
+    )
     async def details(self, interaction: discord.Interaction, _: discord.ui.Button):
         if not await interaction_can_read_logs(interaction):
             return
@@ -497,7 +554,11 @@ class LogPager(discord.ui.View):
             ephemeral=True,
         )
 
-    @discord.ui.button(label="Close", style=discord.ButtonStyle.danger)
+    @discord.ui.button(
+        label="Close",
+        style=discord.ButtonStyle.danger,
+        emoji=BUTTON_EMOJI["support"],
+    )
     async def close(self, interaction: discord.Interaction, _: discord.ui.Button):
         await interaction.response.edit_message(content="Log browser closed.", embed=None, view=None)
 
@@ -508,7 +569,11 @@ class MemberActivityView(discord.ui.View):
         self.client = client
         self.member_id = member_id
 
-    @discord.ui.button(label="Browse recent logs", style=discord.ButtonStyle.primary)
+    @discord.ui.button(
+        label="Browse recent logs",
+        style=discord.ButtonStyle.primary,
+        emoji=BUTTON_EMOJI["message"],
+    )
     async def browse(self, interaction: discord.Interaction, _: discord.ui.Button):
         if not interaction.guild or not await interaction_can_read_logs(interaction):
             return
@@ -561,7 +626,7 @@ def help_embed(category: str = "Overview") -> discord.Embed:
         "General": (
             "`/help` — open this interactive command guide.\n"
             "`/info` — show version, uptime, and latency.\n"
-            "`/support` — show configured support resources.\n"
+            "`/support` — open command and setup help.\n"
             "`/config` — open interactive server settings.\n\n"
             "`/config` requires Manage Server or Administrator."
         ),
@@ -575,8 +640,19 @@ def help_embed(category: str = "Overview") -> discord.Embed:
 class HelpSelect(discord.ui.Select):
     def __init__(self):
         options = [
-            discord.SelectOption(label=key, value=key, description=f"Browse {key.lower()} commands")
-            for key in ("Setup", "Logging", "Messages", "Members", "General")
+            discord.SelectOption(
+                label=label,
+                value=key,
+                description=f"Browse {key.lower()} commands",
+                emoji=BUTTON_EMOJI[emoji],
+            )
+            for key, label, emoji in (
+                ("Setup", "Setup", "config"),
+                ("Logging", "Logging", "config"),
+                ("Messages", "Messages", "message"),
+                ("Members", "Members", "member"),
+                ("General", "General", "info"),
+            )
         ]
         super().__init__(placeholder="Choose a command category", options=options, min_values=1, max_values=1)
 
@@ -591,9 +667,91 @@ class HelpView(discord.ui.View):
         super().__init__(timeout=300)
         self.add_item(HelpSelect())
 
-    @discord.ui.button(label="Close", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(
+        label="Close",
+        style=discord.ButtonStyle.secondary,
+        emoji=BUTTON_EMOJI["support"],
+        row=1,
+    )
     async def close(self, interaction: discord.Interaction, _: discord.ui.Button):
         await interaction.response.edit_message(content="Help closed.", embed=None, view=None)
+
+
+def support_embed() -> discord.Embed:
+    embed = new_embed(f"{EMOJI['support']}  MessageLog Support")
+    embed.description = (
+        "Choose **Commands** for the full guide or **Setup** for the first steps."
+    )
+    embed.add_field(
+        name="Quick start",
+        value="`/create channel` creates a private log channel and enables logging.\n"
+        "`/set channel` selects an existing channel.\n"
+        "`/logs test` checks that MessageLog can post there.",
+        inline=False,
+    )
+    if SUPPORT_URL:
+        embed.add_field(
+            name="Support resources",
+            value=f"[Open MessageLog Support]({SUPPORT_URL})",
+            inline=False,
+        )
+    else:
+        embed.add_field(
+            name="Support resources",
+            value="Use the buttons below for the command guide and setup help.",
+            inline=False,
+        )
+    embed.set_footer(text="MessageLog • Support and command help")
+    return embed
+
+
+class SupportView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=300)
+        if SUPPORT_URL.startswith(("https://", "http://")):
+            self.add_item(
+                discord.ui.Button(
+                    label="Support Server",
+                    style=discord.ButtonStyle.link,
+                    url=SUPPORT_URL,
+                    emoji=BUTTON_EMOJI["support"],
+                )
+            )
+
+    @discord.ui.button(
+        label="Commands",
+        style=discord.ButtonStyle.primary,
+        emoji=BUTTON_EMOJI["info"],
+    )
+    async def commands(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_message(
+            embed=help_embed(), view=HelpView(), ephemeral=True
+        )
+
+    @discord.ui.button(
+        label="Setup",
+        style=discord.ButtonStyle.secondary,
+        emoji=BUTTON_EMOJI["config"],
+    )
+    async def setup(self, interaction: discord.Interaction, _: discord.ui.Button):
+        embed = new_embed(f"{EMOJI['config']}  Getting started")
+        embed.description = (
+            "1. Run `/create channel` to create a private destination, "
+            "or `/set channel` to select one.\n"
+            "2. Run `/logs enable` if logging is not already enabled.\n"
+            "3. Run `/logs test` to verify the bot can post.\n\n"
+            "Use `/config` to choose which event types to track. "
+            "Server changes require Manage Server or Administrator."
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(
+        label="Close",
+        style=discord.ButtonStyle.secondary,
+        emoji=BUTTON_EMOJI["support"],
+    )
+    async def close(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.edit_message(content="Support closed.", embed=None, view=None)
 
 
 class SetChannelModal(discord.ui.Modal, title="Set logging channel"):
@@ -622,8 +780,8 @@ class SetChannelModal(discord.ui.Modal, title="Set logging channel"):
         if error:
             await interaction.response.send_message(error, ephemeral=True)
             return
-        await record_config_change(interaction.guild, interaction.user, f"Logging channel set to {channel.mention}.")
         await interaction.response.send_message(f"Logging channel set to {channel.mention}.", ephemeral=True)
+        await record_config_change(interaction.guild, interaction.user, f"Logging channel set to {channel.mention}.")
 
 
 class ConfigEventSelect(discord.ui.Select):
@@ -657,13 +815,13 @@ class ConfigEventSelect(discord.ui.Select):
         config = await DB.get_config(interaction.guild.id)
         events = {key: key in selected for key in config["event_types"]}
         await DB.update_config(interaction.guild.id, event_types=events)
-        await record_config_change(interaction.guild, interaction.user, "Updated tracked event types.")
         for option in self.options:
             option.default = option.value in selected
         await interaction.response.edit_message(
             embed=config_embed(interaction.guild, await DB.get_config(interaction.guild.id)),
             view=self.view,
         )
+        await record_config_change(interaction.guild, interaction.user, "Updated tracked event types.")
 
 
 class ConfigView(discord.ui.View):
@@ -683,28 +841,46 @@ class ConfigView(discord.ui.View):
             embed=config_embed(interaction.guild, config), view=self
         )
 
-    @discord.ui.button(label="Enable Logging", style=discord.ButtonStyle.success)
+    @discord.ui.button(
+        label="Enable Logging",
+        style=discord.ButtonStyle.success,
+        emoji=BUTTON_EMOJI["config"],
+    )
     async def toggle_logging(self, interaction: discord.Interaction, _: discord.ui.Button):
         if not interaction.guild or not await interaction_admin(interaction):
             return
+        await interaction.response.defer()
         config = await DB.get_config(interaction.guild.id)
         new_state = not config["enabled"]
         if new_state and not await resolve_log_channel(interaction.guild, config.get("channel_id")):
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "Set a logging channel before enabling logging.", ephemeral=True
             )
             return
         await DB.update_config(interaction.guild.id, enabled=new_state)
+        updated = await DB.get_config(interaction.guild.id)
+        self.toggle_logging.label = "Disable Logging" if updated["enabled"] else "Enable Logging"
+        await interaction.edit_original_response(
+            embed=config_embed(interaction.guild, updated),
+            view=self,
+        )
         await record_config_change(interaction.guild, interaction.user, f"{'Enabled' if new_state else 'Disabled'} logging.")
-        await self.refresh(interaction)
 
-    @discord.ui.button(label="Set Channel", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(
+        label="Set Channel",
+        style=discord.ButtonStyle.secondary,
+        emoji=BUTTON_EMOJI["config"],
+    )
     async def set_channel(self, interaction: discord.Interaction, _: discord.ui.Button):
         if not interaction.guild or not await interaction_admin(interaction):
             return
         await interaction.response.send_modal(SetChannelModal())
 
-    @discord.ui.button(label="Create Channel", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(
+        label="Create Channel",
+        style=discord.ButtonStyle.secondary,
+        emoji=BUTTON_EMOJI["config"],
+    )
     async def create_channel(self, interaction: discord.Interaction, _: discord.ui.Button):
         if not interaction.guild or not await interaction_admin(interaction):
             return
@@ -713,14 +889,18 @@ class ConfigView(discord.ui.View):
             channel = await create_log_channel(interaction.guild)
             await setup_channel(interaction.guild, channel)
             await DB.update_config(interaction.guild.id, enabled=True)
+            await interaction.followup.send(f"Created and configured {channel.mention}.", ephemeral=True)
             await record_config_change(
                 interaction.guild, interaction.user, f"Created logging channel {channel.mention}."
             )
-            await interaction.followup.send(f"Created and configured {channel.mention}.", ephemeral=True)
         except (PermissionError, discord.Forbidden, discord.HTTPException) as exc:
             await interaction.followup.send(str(exc) or "I couldn't create the channel.", ephemeral=True)
 
-    @discord.ui.button(label="View Commands", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(
+        label="View Commands",
+        style=discord.ButtonStyle.secondary,
+        emoji=BUTTON_EMOJI["info"],
+    )
     async def view_commands(self, interaction: discord.Interaction, _: discord.ui.Button):
         await interaction.response.send_message(
             embed=help_embed("Setup"), view=HelpView(), ephemeral=True
@@ -754,8 +934,8 @@ async def set_channel_command(interaction: discord.Interaction, channel: discord
     if error:
         await interaction.response.send_message(error, ephemeral=True)
         return
-    await record_config_change(interaction.guild, interaction.user, f"Logging channel set to {channel.mention}.")
     await interaction.response.send_message(f"Logging channel set to {channel.mention}.", ephemeral=True)
+    await record_config_change(interaction.guild, interaction.user, f"Logging channel set to {channel.mention}.")
 
 
 @create_group.command(name="channel", description="Create and configure a private message-log channel")
@@ -768,8 +948,8 @@ async def create_channel_command(interaction: discord.Interaction):
         channel = await create_log_channel(interaction.guild)
         await setup_channel(interaction.guild, channel)
         await DB.update_config(interaction.guild.id, enabled=True)
-        await record_config_change(interaction.guild, interaction.user, f"Created logging channel {channel.mention}.")
         await interaction.followup.send(f"Created and configured {channel.mention}.", ephemeral=True)
+        await record_config_change(interaction.guild, interaction.user, f"Created logging channel {channel.mention}.")
     except (PermissionError, discord.Forbidden, discord.HTTPException) as exc:
         await interaction.followup.send(str(exc) or "I couldn't create the channel.", ephemeral=True)
 
@@ -780,8 +960,8 @@ async def remove_channel_command(interaction: discord.Interaction):
     if not interaction.guild or not await interaction_admin(interaction):
         return
     await DB.update_config(interaction.guild.id, channel_id=None, enabled=False)
-    await record_config_change(interaction.guild, interaction.user, "Removed the logging channel and disabled logging.")
     await interaction.response.send_message("Logging channel removed; logging is now disabled.", ephemeral=True)
+    await record_config_change(interaction.guild, interaction.user, "Removed the logging channel and disabled logging.")
 
 
 @bot.tree.command(name="channel", description="Display the current logging channel and configuration")
@@ -799,17 +979,18 @@ async def channel_command(interaction: discord.Interaction):
 async def logs_enable(interaction: discord.Interaction):
     if not interaction.guild or not await interaction_admin(interaction):
         return
+    await interaction.response.defer(ephemeral=True, thinking=True)
     config = await DB.get_config(interaction.guild.id)
     channel = await resolve_log_channel(interaction.guild, config.get("channel_id"))
     if not channel:
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "No accessible logging channel is configured. Use `/set channel` or `/create channel` first.",
             ephemeral=True,
         )
         return
     await DB.update_config(interaction.guild.id, enabled=True)
+    await interaction.followup.send(f"Logging enabled in {channel.mention}.", ephemeral=True)
     await record_config_change(interaction.guild, interaction.user, "Enabled event logging.")
-    await interaction.response.send_message(f"Logging enabled in {channel.mention}.", ephemeral=True)
 
 
 @logs_group.command(name="disable", description="Pause event logging for this server")
@@ -818,8 +999,8 @@ async def logs_disable(interaction: discord.Interaction):
     if not interaction.guild or not await interaction_admin(interaction):
         return
     await DB.update_config(interaction.guild.id, enabled=False)
-    await record_config_change(interaction.guild, interaction.user, "Disabled event logging.")
     await interaction.response.send_message("Logging disabled. Stored records remain available until retention expiry.", ephemeral=True)
+    await record_config_change(interaction.guild, interaction.user, "Disabled event logging.")
 
 
 @logs_group.command(name="status", description="Show logging state and enabled event types")
@@ -837,10 +1018,11 @@ async def logs_status(interaction: discord.Interaction):
 async def logs_test(interaction: discord.Interaction):
     if not interaction.guild or not await interaction_admin(interaction):
         return
+    await interaction.response.defer(ephemeral=True, thinking=True)
     config = await DB.get_config(interaction.guild.id)
     channel = await resolve_log_channel(interaction.guild, config.get("channel_id"))
     if not channel:
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "No accessible logging channel is configured. Use `/set channel` or `/create channel` first.",
             ephemeral=True,
         )
@@ -848,12 +1030,18 @@ async def logs_test(interaction: discord.Interaction):
     try:
         embed = new_embed(f"{EMOJI['info']}  MessageLog test", "This test confirms that I can post embeds here.", GREEN)
         embed.set_footer(text=f"Requested by {interaction.user}")
-        await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
-        await interaction.response.send_message(f"Test log sent to {channel.mention}.", ephemeral=True)
+        lock = _log_send_locks.setdefault(interaction.guild.id, asyncio.Lock())
+        async with lock:
+            await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        await interaction.followup.send(f"Test log sent to {channel.mention}.", ephemeral=True)
+    except discord.NotFound:
+        await DB.update_config(interaction.guild.id, channel_id=None, enabled=False)
+        await interaction.followup.send("The configured channel no longer exists; logging is disabled. Choose another channel.", ephemeral=True)
     except discord.Forbidden:
-        await interaction.response.send_message("I don't have permission to post in that channel.", ephemeral=True)
+        await DB.update_config(interaction.guild.id, enabled=False)
+        await interaction.followup.send("I don't have permission to post in that channel; logging is disabled until permissions are fixed.", ephemeral=True)
     except discord.HTTPException:
-        await interaction.response.send_message("Discord couldn't accept the test message. Try again shortly.", ephemeral=True)
+        await interaction.followup.send("Discord couldn't accept the test message. Try again shortly.", ephemeral=True)
 
 
 @message_group.command(name="view", description="View a stored log record by its record ID")
@@ -1018,12 +1206,11 @@ async def info_command(interaction: discord.Interaction):
 
 @bot.tree.command(name="support", description="Show MessageLog support resources")
 async def support_command(interaction: discord.Interaction):
-    embed = new_embed(f"{EMOJI['support']}  Support")
-    if SUPPORT_URL:
-        embed.description = f"For help and support resources, visit [MessageLog Support]({SUPPORT_URL})."
-    else:
-        embed.description = "No support-server link has been configured by the bot operator."
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.response.send_message(
+        embed=support_embed(),
+        view=SupportView(),
+        ephemeral=True,
+    )
 
 
 @bot.tree.command(name="config", description="Open the interactive server logging configuration panel")
