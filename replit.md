@@ -1,15 +1,17 @@
-# [Project name]
+# MessageLog
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+MessageLog is a Discord server utility bot for logging deleted and edited messages, searching stored event history, and managing independent logging settings per server.
 
 ## Run & Operate
 
 - `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
+- **MessageLog Bot** workflow — run the Discord bot process
 - `pnpm run typecheck` — full typecheck across all packages
 - `pnpm run build` — typecheck + build all packages
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
 - `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
+- Required secret: `DISCORD_BOT_TOKEN` — Discord bot application token
+- Optional bot env: `DATABASE_PATH`, `SUPPORT_URL`, `BOT_VERSION`
 
 ## Stack
 
@@ -22,23 +24,31 @@ _Replace the heading above with the project's name, and this line with one sente
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `bots/messagelog/bot.py` — slash commands, event handlers, embeds, and components
+- `bots/messagelog/database.py` — SQLite persistence for guild settings and event records
+- `bots/messagelog/README.md` — Developer Portal, permissions, setup, limitations, and command reference
+- `artifacts/api-server` — existing shared API service
+- `artifacts/mockup-sandbox` — design canvas preview service
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- The Discord bot is a persistent Python process, separate from the shared HTTP API.
+- SQLite is used for the initial single-process bot; move to PostgreSQL before running multiple bot instances.
+- Deleted-message content is only recorded when Discord delivers a cached message to the bot.
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+Per-server message logging with 20 slash commands, private configuration, event search/history, and interactive Discord embeds.
 
 ## User preferences
 
-_Populate as you build — explicit user instructions worth remembering across sessions._
+_No additional standing preferences recorded._
 
 ## Gotchas
 
-_Populate as you build — sharp edges, "always run X before Y" rules._
+- Discord must have Message Content and Server Members Gateway Intents enabled for the configured bot application.
+- The bot's token must remain in Replit Secrets; never put it in source, chat, or a committed `.env`.
+- SQLite retention cleanup runs when new records are written for a server.
 
 ## Pointers
 

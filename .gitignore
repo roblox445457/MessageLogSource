@@ -10,6 +10,13 @@ out-tsc
 
 # dependencies
 node_modules
+/.pythonlibs/
+
+# Python bot runtime and local data
+__pycache__/
+*.py[cod]
+/bots/messagelog/.env
+/bots/messagelog/*.sqlite3
 
 # IDEs and editors
 /.idea
